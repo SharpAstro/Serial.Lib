@@ -45,6 +45,7 @@ public sealed record SerialSettings(int BaudRate)
     /// <summary>
     /// How long a whole read may take, from the call to its last byte, unless the call names its own.
     /// A read that runs out of it throws <see cref="SerialTimeoutException"/>, never a default value.
+    /// <see cref="Timeout.InfiniteTimeSpan"/> means none: only the caller's token ends a read.
     /// </summary>
     public TimeSpan ReadTimeout { get; init; } = TimeSpan.FromSeconds(1);
 
@@ -70,8 +71,8 @@ public sealed record SerialSettings(int BaudRate)
         {
             throw new ArgumentOutOfRangeException(nameof(DataBits), DataBits, "Data bits must be 5 to 8.");
         }
-        foreach (var (name, value) in new[] { (nameof(ReadTimeout), ReadTimeout), (nameof(WriteTimeout), WriteTimeout),
-                                              (nameof(OpenTimeout), OpenTimeout), (nameof(CloseTimeout), CloseTimeout) })
+        SerialPortCore.ThrowIfInvalidReadTimeout(ReadTimeout, nameof(ReadTimeout));
+        foreach (var (name, value) in new[] { (nameof(WriteTimeout), WriteTimeout), (nameof(OpenTimeout), OpenTimeout), (nameof(CloseTimeout), CloseTimeout) })
         {
             if (value <= TimeSpan.Zero)
             {

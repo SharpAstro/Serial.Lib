@@ -48,6 +48,7 @@ public interface ISerialPort : IAsyncDisposable
     /// <summary>
     /// Reads until any byte of <paramref name="terminators"/>, which is consumed and not stored.
     /// </summary>
+    /// <param name="timeout">The deadline for the whole read, or <see cref="Timeout.InfiniteTimeSpan"/> for none (the token alone ends it).</param>
     /// <returns>The number of bytes stored in <paramref name="buffer"/>.</returns>
     /// <exception cref="SerialTimeoutException">No terminator within <paramref name="timeout"/>.</exception>
     /// <exception cref="SerialFramingException">No terminator within <paramref name="buffer"/>'s length: the reply is refused, never truncated.</exception>
@@ -58,6 +59,7 @@ public interface ISerialPort : IAsyncDisposable
         => ReadTerminatedAsync(buffer, terminators, Settings.ReadTimeout, cancellationToken);
 
     /// <summary>Reads exactly <paramref name="buffer"/>'s length.</summary>
+    /// <param name="timeout">The deadline for the whole read, or <see cref="Timeout.InfiniteTimeSpan"/> for none.</param>
     /// <exception cref="SerialTimeoutException">Fewer bytes arrived within <paramref name="timeout"/>.</exception>
     ValueTask ReadExactlyAsync(Memory<byte> buffer, TimeSpan timeout, CancellationToken cancellationToken = default);
 

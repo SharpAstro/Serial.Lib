@@ -66,7 +66,7 @@ internal sealed class SerialPortCore : ISerialPort
         {
             throw new ArgumentException("At least one terminator is needed.", nameof(terminators));
         }
-        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(timeout, TimeSpan.Zero);
+        ThrowIfInvalidReadTimeout(timeout, nameof(timeout));
         ThrowIfClosed();
         cancellationToken.ThrowIfCancellationRequested();
         EnterRead();
@@ -87,7 +87,7 @@ internal sealed class SerialPortCore : ISerialPort
 
     public async ValueTask ReadExactlyAsync(Memory<byte> buffer, TimeSpan timeout, CancellationToken cancellationToken = default)
     {
-        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(timeout, TimeSpan.Zero);
+        ThrowIfInvalidReadTimeout(timeout, nameof(timeout));
         ThrowIfClosed();
         cancellationToken.ThrowIfCancellationRequested();
         EnterRead();
@@ -297,6 +297,11 @@ internal sealed class SerialPortCore : ISerialPort
     private void FillOrFail(long start, TimeSpan timeout, ReadOnlySpan<byte> received, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        if (timeout == Timeout.InfiniteTimeSpan)
+        {
+            _rxEnd = ReadBackend(_rx, ReadSlice);
+            return;
+        }
         var remaining = timeout - _time.GetElapsedTime(start);
         if (remaining <= TimeSpan.Zero)
         {
@@ -305,6 +310,15 @@ internal sealed class SerialPortCore : ISerialPort
                 timeout, received.ToArray());
         }
         _rxEnd = ReadBackend(_rx, remaining < ReadSlice ? remaining : ReadSlice);
+    }
+
+    /// <summary>A read deadline is positive, or <see cref="Timeout.InfiniteTimeSpan"/> for none (the token alone ends the read).</summary>
+    internal static void ThrowIfInvalidReadTimeout(TimeSpan timeout, string paramName)
+    {
+        if (timeout != Timeout.InfiniteTimeSpan && timeout <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(paramName, timeout, "A read timeout must be positive, or Timeout.InfiniteTimeSpan for none.");
+        }
     }
 
     private int ReadBackend(Span<byte> into, TimeSpan timeout)
