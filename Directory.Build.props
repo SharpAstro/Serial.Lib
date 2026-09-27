@@ -1,0 +1,18 @@
+<Project>
+
+  <PropertyGroup>
+    <!-- THE version for this repo, and the only place it is written. CI reads it back
+         (dotnet msbuild -getProperty:VersionMajorMinor) and appends the run number, so a release
+         bump is this one line. 1.0 is P1 of docs/plans/serial-lib.md in tianwen: the managed backend. -->
+    <VersionMajorMinor>1.0</VersionMajorMinor>
+    <!-- Local builds get Major.Minor.0; CI passes -p:Version=Major.Minor.<run><attempt>+<sha>, and
+         the condition lets it win. -->
+    <VersionPrefix Condition="'$(VersionPrefix)' == ''">$(VersionMajorMinor).0</VersionPrefix>
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild Condition="'$(GITHUB_ACTIONS)' == 'true'">true</ContinuousIntegrationBuild>
+    <LangVersion>latest</LangVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>

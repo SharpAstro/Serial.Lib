@@ -1,0 +1,13 @@
+# LF everywhere, in the working copy as well as the repo.
+* text=auto eol=lf
+*.cs text
+*.csproj text
+*.props text
+*.targets text
+*.slnx text
+*.json text
+*.yml text
+*.md text
+
+*.png binary
+*.gz binary

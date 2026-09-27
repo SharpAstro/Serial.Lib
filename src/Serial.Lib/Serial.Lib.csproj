@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>SharpAstro.Serial</RootNamespace>
+    <IsAotCompatible>true</IsAotCompatible>
+    <IsTrimmable>true</IsTrimmable>
+    <!-- LibraryImport (source-generated, AOT-clean) for the Windows device enumeration. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
+    <!-- AssemblyVersion is major.minor.0.0, DERIVED from the one place the number is written
+         (VersionMajorMinor in the repo-root Directory.Build.props). Bump it THERE. -->
+    <AssemblyVersion>$(VersionMajorMinor).0.0</AssemblyVersion>
+    <PackageId>Serial.Lib</PackageId>
+    <Description>Serial port I/O that does one job well: cancellable, deadline-honouring reads and writes that never abort spuriously (the CH34x ERROR_OPERATION_ABORTED trap of System.IO.Ports async reads), a bounded open and close, typed failures (timeout with the partial reply, framing, device removed, port busy, I/O the driver never completed), and port enumeration with a stable hardware identity (USB VID/PID, serial number, socket location).</Description>
+    <PackageTags>serial;serialport;com;uart;usb-serial;ch340;ftdi;astronomy</PackageTags>
+    <Authors>Sebastian Godelet</Authors>
+    <PackageLicenseFile>LICENSE</PackageLicenseFile>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <RepositoryUrl>https://github.com/SharpAstro/Serial.Lib.git</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <DebugType>embedded</DebugType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.IO.Ports" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Serial.Lib.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="../../LICENSE" Pack="true" PackagePath="/" />
+    <None Include="../../README.md" Pack="true" PackagePath="/" />
+  </ItemGroup>
+
+</Project>
