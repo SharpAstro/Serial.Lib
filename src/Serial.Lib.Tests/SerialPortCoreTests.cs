@@ -320,6 +320,38 @@ public sealed class SerialPortCoreTests
         backend.CloseCalls.ShouldBe(1);
     }
 
+    [Fact(Timeout = 10_000)]
+    public async Task AReadWithNoDeadlineWaitsForItsReply()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var backend = new FakeBackend();
+        await using var port = await OpenAsync(backend, ct, Settings(readMs: 100));
+        var late = Task.Run(async () =>
+        {
+            // Well past the port's own 100 ms deadline, which this read overrides.
+            await Task.Delay(700, ct);
+            backend.Feed("EOK#");
+        }, ct);
+
+        var buffer = new byte[16];
+        var n = await port.ReadTerminatedAsync(buffer, Hash, Timeout.InfiniteTimeSpan, ct);
+
+        Encoding.ASCII.GetString(buffer, 0, n).ShouldBe("EOK");
+        await late;
+    }
+
+    [Fact(Timeout = 10_000)]
+    public async Task AReadWithNoDeadlineStillEndsOnItsToken()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var backend = new FakeBackend();
+        await using var port = await OpenAsync(backend, ct, Settings() with { ReadTimeout = Timeout.InfiniteTimeSpan });
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(300);
+
+        await Should.ThrowAsync<OperationCanceledException>(async () => await ReadReplyAsync(port, cts.Token));
+    }
+
     [Fact]
     public void SettingsRefuseANonPositiveTimeout()
     {
