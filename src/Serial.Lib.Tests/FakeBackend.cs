@@ -1,21 +1,22 @@
 using System.Collections.Concurrent;
+using System.Threading.Channels;
 using SharpAstro.Serial.Backends;
 
 namespace SharpAstro.Serial.Tests;
 
 /// <summary>
-/// A scripted blocking transport: bytes fed from the test arrive at the next read, and a write, an open or a close
-/// can be made to block (until released) or to throw, which is how the core's deadlines and guards are exercised
-/// without hardware.
+/// A scripted transport: bytes fed from the test arrive at the next read, and a write, an open or a close can be
+/// made to hang (until released) or to throw, which is how the core's deadlines and guards are exercised without
+/// hardware. It waits on a channel and on a gate, never by blocking a thread.
 /// </summary>
 internal sealed class FakeBackend : ISerialBackend
 {
-    private readonly BlockingCollection<byte> _rx = new BlockingCollection<byte>();
+    private readonly Channel<byte> _rx = Channel.CreateUnbounded<byte>();
     private readonly ConcurrentQueue<byte[]> _written = new ConcurrentQueue<byte[]>();
     private volatile bool _open;
 
-    /// <summary>Released to let a blocked write, open or close finish.</summary>
-    public ManualResetEventSlim Release { get; } = new ManualResetEventSlim(false);
+    /// <summary>Released to let a hung write, open or close finish.</summary>
+    public Gate Release { get; } = new Gate();
 
     public bool BlockWrites { get; set; }
     public bool BlockOpen { get; set; }
@@ -27,17 +28,19 @@ internal sealed class FakeBackend : ISerialBackend
 
     public IReadOnlyList<byte[]> Written => [.. _written];
 
+    public int BytesToRead => _rx.Reader.Count;
+
     public void Feed(string ascii)
     {
         foreach (var c in ascii)
         {
-            _rx.Add((byte)c);
+            _rx.Writer.TryWrite((byte)c);
         }
     }
 
     public bool IsOpen => _open;
 
-    public void Open()
+    public async ValueTask OpenAsync(CancellationToken cancellationToken)
     {
         if (OpenFault is { } fault)
         {
@@ -45,31 +48,39 @@ internal sealed class FakeBackend : ISerialBackend
         }
         if (BlockOpen)
         {
-            Release.Wait();
+            await Release.Task;
         }
         _open = true;
     }
 
-    public int Read(Span<byte> buffer, TimeSpan timeout)
+    public async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken)
     {
-        if (ReadFault is { } fault)
+        while (true)
         {
-            throw fault;
+            if (ReadFault is { } fault)
+            {
+                throw fault;
+            }
+            var got = ReadAvailable(buffer.Span);
+            if (got > 0)
+            {
+                return got;
+            }
+            await _rx.Reader.WaitToReadAsync(cancellationToken);
         }
-        if (!_rx.TryTake(out var first, timeout))
+    }
+
+    public int ReadAvailable(Span<byte> buffer)
+    {
+        var n = 0;
+        while (n < buffer.Length && _rx.Reader.TryRead(out var b))
         {
-            return 0;
-        }
-        buffer[0] = first;
-        var n = 1;
-        while (n < buffer.Length && _rx.TryTake(out var next))
-        {
-            buffer[n++] = next;
+            buffer[n++] = b;
         }
         return n;
     }
 
-    public void Write(ReadOnlySpan<byte> data)
+    public async ValueTask WriteAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
     {
         if (WriteFault is { } fault)
         {
@@ -78,16 +89,15 @@ internal sealed class FakeBackend : ISerialBackend
         var copy = data.ToArray();
         if (BlockWrites)
         {
-            Release.Wait();
+            // A driver that never completes the write and ignores the token, as bthmodem.sys does.
+            await Release.Task;
         }
         _written.Enqueue(copy);
     }
 
-    public int BytesToRead => _rx.Count;
-
     public void DiscardInBuffer()
     {
-        while (_rx.TryTake(out _))
+        while (_rx.Reader.TryRead(out _))
         {
         }
     }
@@ -96,13 +106,23 @@ internal sealed class FakeBackend : ISerialBackend
 
     public bool Rts { get; set; }
 
-    public void Close()
+    public async ValueTask CloseAsync()
     {
         Interlocked.Increment(ref CloseCalls);
         if (BlockClose)
         {
-            Release.Wait();
+            await Release.Task;
         }
         _open = false;
+    }
+
+    /// <summary>A one-shot gate a hung operation awaits.</summary>
+    internal sealed class Gate
+    {
+        private readonly TaskCompletionSource _tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task Task => _tcs.Task;
+
+        public void Set() => _tcs.TrySetResult();
     }
 }

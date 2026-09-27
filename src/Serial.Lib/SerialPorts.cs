@@ -54,31 +54,35 @@ public static class SerialPorts
         TimeProvider time, Func<string, bool> portExists, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var open = Task.Run(backend.Open, CancellationToken.None);
+        var open = backend.OpenAsync(cancellationToken).AsTask();
         try
         {
-            await open.WaitAsync(settings.OpenTimeout, time, cancellationToken).ConfigureAwait(false);
-        }
-        catch (Exception ex) when ((ex is TimeoutException || (ex is OperationCanceledException && cancellationToken.IsCancellationRequested)) && !open.IsCompleted)
-        {
-            // Never leak the handle a late open may still produce.
-            _ = open.ContinueWith(_ => { try { backend.Close(); } catch (Exception) { } }, CancellationToken.None,
-                TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
-            if (ex is OperationCanceledException)
+            try
             {
-                throw;
+                await open.WaitAsync(settings.OpenTimeout, time, cancellationToken).ConfigureAwait(false);
             }
-            throw new SerialTimeoutException(portName, $"{portName} did not open within {settings.OpenTimeout.TotalMilliseconds:0} ms.", settings.OpenTimeout);
-        }
-        catch (Exception ex) when (ex is TimeoutException or OperationCanceledException && open.IsCompletedSuccessfully)
-        {
-            // Opened in the race with the deadline: keep it.
+            catch (Exception ex) when ((ex is TimeoutException || (ex is OperationCanceledException && cancellationToken.IsCancellationRequested)) && !open.IsCompleted)
+            {
+                // Never leak the handle a late open may still produce.
+                _ = open.ContinueWith(static (_, state) => CloseQuietlyAsync((ISerialBackend)state!), backend, CancellationToken.None,
+                    TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+                if (ex is OperationCanceledException)
+                {
+                    throw;
+                }
+                throw new SerialTimeoutException(portName, $"{portName} did not open within {settings.OpenTimeout.TotalMilliseconds:0} ms.", settings.OpenTimeout);
+            }
+            catch (Exception ex) when (ex is TimeoutException or OperationCanceledException)
+            {
+                // It finished in the race with the deadline: its own outcome decides, below.
+            }
+            await open.ConfigureAwait(false);
         }
         catch (UnauthorizedAccessException ex)
         {
             throw new SerialPortBusyException(portName, ex);
         }
-        catch (Exception ex) when (ex is IOException or ArgumentException or InvalidOperationException)
+        catch (Exception ex) when (ex is IOException or ArgumentException or InvalidOperationException && ex is not SerialException)
         {
             if (!portExists(portName))
             {
@@ -88,5 +92,17 @@ public static class SerialPorts
         }
 
         return new SerialPortCore(backend, portName, settings, time, portExists, time.GetUtcNow());
+    }
+
+    private static async Task CloseQuietlyAsync(ISerialBackend backend)
+    {
+        try
+        {
+            await backend.CloseAsync().ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            // A late handle that will not even close has nobody left to report to.
+        }
     }
 }

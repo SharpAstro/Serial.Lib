@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+using System.Threading.Channels;
 using SharpAstro.Serial.Backends;
 
 namespace SharpAstro.Serial;
@@ -18,20 +18,17 @@ public static class SerialLoopback
         ArgumentNullException.ThrowIfNull(settings);
         settings.Validate();
         var time = timeProvider ?? TimeProvider.System;
-        // Each queue is shared by the two ends for the pair's whole life, so neither end may dispose it; a
-        // BlockingCollection's SemaphoreSlim creates no kernel handle unless one is asked for, so there is nothing
-        // to leak.
-#pragma warning disable CA2000
-        var toSecond = new BlockingCollection<byte>();
-        var toFirst = new BlockingCollection<byte>();
-#pragma warning restore CA2000
-        return (Open("loopback-1", new LoopbackBackend(toFirst, toSecond), settings, time),
-                Open("loopback-2", new LoopbackBackend(toSecond, toFirst), settings, time));
+        var options = new UnboundedChannelOptions { SingleReader = true, SingleWriter = true };
+        var toSecond = Channel.CreateUnbounded<byte>(options);
+        var toFirst = Channel.CreateUnbounded<byte>(options);
+        return (Open("loopback-1", new LoopbackBackend(toFirst.Reader, toSecond.Writer), settings, time),
+                Open("loopback-2", new LoopbackBackend(toSecond.Reader, toFirst.Writer), settings, time));
     }
 
     private static SerialPortCore Open(string name, LoopbackBackend backend, SerialSettings settings, TimeProvider time)
     {
-        backend.Open();
+        // Completes synchronously: a loopback end has nothing to open.
+        _ = backend.OpenAsync(CancellationToken.None);
         return new SerialPortCore(backend, name, settings, time, static _ => true, time.GetUtcNow());
     }
 }

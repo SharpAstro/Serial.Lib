@@ -1,27 +1,32 @@
 namespace SharpAstro.Serial.Backends;
 
 /// <summary>
-/// The OS seam under <see cref="SerialPortCore"/>: plain BLOCKING calls, each bounded by what the call says. Every
-/// guarantee of <see cref="ISerialPort"/> (deadlines, cancellation, framing, the carry-over, abandoned I/O, removal)
-/// is built above this, once, so a backend only has to be a faithful blocking transport. The managed one wraps
-/// <c>System.IO.Ports</c>; a native Win32 one (P2) will drive the handle itself.
+/// The transport seam under <see cref="SerialPortCore"/>. Every guarantee of <see cref="ISerialPort"/> (deadlines,
+/// framing, the carry-over, abandoned I/O, removal, the bounded open and close) is built above this, once, so a
+/// backend only has to be a faithful transport. It is asynchronous so a backend that can wait without a thread does:
+/// the loopback waits on a channel, and a native Win32 backend (P2) will drive overlapped I/O. The managed backend
+/// is the one that cannot, because the only reliable <c>System.IO.Ports</c> read is the blocking one, so its
+/// blocking stays inside it.
 /// </summary>
 internal interface ISerialBackend
 {
-    void Open();
+    ValueTask OpenAsync(CancellationToken cancellationToken);
 
     bool IsOpen { get; }
 
-    /// <summary>Blocks for at most <paramref name="timeout"/> for at least one byte.</summary>
-    /// <returns>The bytes read, or 0 when the timeout passed with none.</returns>
-    int Read(Span<byte> buffer, TimeSpan timeout);
+    /// <summary>Waits for at least one byte.</summary>
+    /// <returns>The bytes read, never 0.</returns>
+    /// <exception cref="OperationCanceledException">The token fired first. No read is left pending, and no byte is lost:
+    /// a byte that arrived as the token fired is either returned or still in the backend.</exception>
+    ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken);
 
-    /// <summary>Blocks until the driver has every byte.</summary>
+    /// <summary>What the backend holds now, without waiting.</summary>
+    /// <returns>The bytes read, 0 when none are buffered.</returns>
+    int ReadAvailable(Span<byte> buffer);
+
+    /// <summary>Hands every byte to the transport.</summary>
     /// <exception cref="TimeoutException">The driver gave the write up at its own write timeout.</exception>
-    void Write(ReadOnlySpan<byte> data);
-
-    /// <summary>Bytes the driver holds that a read would return at once.</summary>
-    int BytesToRead { get; }
+    ValueTask WriteAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken);
 
     void DiscardInBuffer();
 
@@ -29,5 +34,5 @@ internal interface ISerialBackend
 
     bool Rts { get; set; }
 
-    void Close();
+    ValueTask CloseAsync();
 }
