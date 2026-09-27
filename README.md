@@ -45,6 +45,12 @@ var n = await port.ReadTerminatedAsync(reply, "#"u8.ToArray());   // throws Seri
 - `OpenedAt` says when the open finished: opening resets many boards (every CH340 one), and some firmware saves
   state on a delay.
 
+## Testing without hardware
+
+`SerialLoopback.CreatePair(settings)` returns two ports wired to each other in memory: what one writes, the
+other reads. They are real ports in every respect but the wire, so a test through them gets the same deadlines,
+framing and carry-over as a COM port.
+
 ## Identity
 
 `SerialPorts.Enumerate()` lists each port with what the OS knows about it: USB vendor and product id, serial
@@ -61,5 +67,6 @@ number, device instance id, and the USB socket's location path (Windows device t
 
 ## Status
 
-1.0 is the managed backend (the blocking half of `System.IO.Ports`). A native Win32 backend (overlapped I/O
+1.0 is the managed backend (the blocking half of `System.IO.Ports`); 1.1 adds reads with no deadline
+(`Timeout.InfiniteTimeSpan`, the token alone ends them) and the loopback pair. A native Win32 backend (overlapped I/O
 driven correctly) is planned as 2.0, behind the same API. Design notes: `docs/plans/serial-lib.md` in tianwen.
