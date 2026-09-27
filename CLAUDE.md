@@ -37,6 +37,6 @@ from it. They open the port once per class: every open resets a CH340 board.
 - **A failure throws; it never returns a default.** A reply that did not come is a `SerialTimeoutException`
   carrying what did arrive. Every exception derives from `SerialException : IOException`.
 - **A new guarantee goes in `SerialPortCore` with a `FakeBackend` test**, never into a backend: a backend is a
-  faithful blocking transport and nothing more.
+  faithful transport and nothing more.
 - **Parsing is pure and platform-neutral** (`UsbInstanceId`, `DeviceStrings`, the Linux describer behind
   `ILinuxFileSystem`), so it is tested on every OS; only the P/Invoke calls are Windows-only.
