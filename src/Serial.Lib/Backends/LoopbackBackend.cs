@@ -1,48 +1,66 @@
-using System.Collections.Concurrent;
+using System.Threading.Channels;
 
 namespace SharpAstro.Serial.Backends;
 
 /// <summary>
-/// One end of an in-memory null-modem cable: what this end writes, the other end reads. Writes never block (the
-/// queue is unbounded), and a read waits for the first byte then takes whatever else is already there, which is
-/// what a UART's receive buffer does.
+/// One end of an in-memory null-modem cable: what this end writes, the other end reads. Nothing here blocks a
+/// thread: a read with nothing buffered awaits the channel, a write never waits (the channel is unbounded), and a
+/// read takes everything already there, which is what a UART's receive buffer does.
 /// </summary>
-internal sealed class LoopbackBackend(BlockingCollection<byte> incoming, BlockingCollection<byte> outgoing) : ISerialBackend
+internal sealed class LoopbackBackend(ChannelReader<byte> incoming, ChannelWriter<byte> outgoing) : ISerialBackend
 {
     private volatile bool _open;
 
     public bool IsOpen => _open;
 
-    public void Open() => _open = true;
-
-    public int Read(Span<byte> buffer, TimeSpan timeout)
+    public ValueTask OpenAsync(CancellationToken cancellationToken)
     {
-        if (buffer.IsEmpty || !incoming.TryTake(out var first, timeout))
+        _open = true;
+        return ValueTask.CompletedTask;
+    }
+
+    public async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken)
+    {
+        while (true)
         {
-            return 0;
+            var got = ReadAvailable(buffer.Span);
+            if (got > 0)
+            {
+                return got;
+            }
+            if (!await incoming.WaitToReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                throw new IOException("The other end of the loopback is closed.");
+            }
         }
-        buffer[0] = first;
-        var n = 1;
-        while (n < buffer.Length && incoming.TryTake(out var next))
+    }
+
+    public int ReadAvailable(Span<byte> buffer)
+    {
+        var n = 0;
+        while (n < buffer.Length && incoming.TryRead(out var b))
         {
-            buffer[n++] = next;
+            buffer[n++] = b;
         }
         return n;
     }
 
-    public void Write(ReadOnlySpan<byte> data)
+    public ValueTask WriteAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
     {
-        foreach (var b in data)
+        foreach (var b in data.Span)
         {
-            outgoing.Add(b);
+            // An unbounded channel always takes the byte while it is open.
+            if (!outgoing.TryWrite(b))
+            {
+                throw new IOException("The other end of the loopback is closed.");
+            }
         }
+        return ValueTask.CompletedTask;
     }
-
-    public int BytesToRead => incoming.Count;
 
     public void DiscardInBuffer()
     {
-        while (incoming.TryTake(out _))
+        while (incoming.TryRead(out _))
         {
         }
     }
@@ -51,5 +69,9 @@ internal sealed class LoopbackBackend(BlockingCollection<byte> incoming, Blockin
 
     public bool Rts { get; set; }
 
-    public void Close() => _open = false;
+    public ValueTask CloseAsync()
+    {
+        _open = false;
+        return ValueTask.CompletedTask;
+    }
 }

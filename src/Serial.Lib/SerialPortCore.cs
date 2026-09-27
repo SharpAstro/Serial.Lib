@@ -3,19 +3,13 @@ using SharpAstro.Serial.Backends;
 namespace SharpAstro.Serial;
 
 /// <summary>
-/// Every guarantee of <see cref="ISerialPort"/>, built once over a blocking <see cref="ISerialBackend"/>: whole-read
-/// deadlines, cancellation observed between short read slices (so no blocked thread is ever abandoned by a read),
-/// framing with a carry-over for bytes past a terminator, the abandoned-write guard, a bounded close, and the
-/// classification of a backend fault as a removed device or an ordinary one.
+/// Every guarantee of <see cref="ISerialPort"/>, built once over an <see cref="ISerialBackend"/>: whole-read deadlines
+/// (a timer-driven token linked with the caller's), framing with a carry-over for bytes past a terminator, the
+/// abandoned-write guard, a bounded close, and the classification of a backend fault as a removed device or an
+/// ordinary one. Nothing here blocks a thread; a backend that has to (the managed one) does it behind its own seam.
 /// </summary>
 internal sealed class SerialPortCore : ISerialPort
 {
-    /// <summary>
-    /// The longest one blocking read waits before the loop looks at the token and the deadline again: short enough
-    /// that a cancel is seen promptly, long enough not to spin.
-    /// </summary>
-    internal static readonly TimeSpan ReadSlice = TimeSpan.FromMilliseconds(200);
-
     private readonly ISerialBackend _backend;
     private readonly TimeProvider _time;
     private readonly Func<string, bool> _portExists;
@@ -72,12 +66,23 @@ internal sealed class SerialPortCore : ISerialPort
         EnterRead();
         try
         {
-            // A reply already sitting in the carry-over completes without a thread hop.
-            if (_rx.AsSpan(_rxStart, _rxEnd - _rxStart).IndexOfAny(terminators.Span) >= 0)
+            var copied = 0;
+            // A reply already in the carry-over completes without a timer or a wait.
+            if (TakeTerminated(buffer.Span, terminators.Span, ref copied))
             {
-                return ReadTerminatedBlocking(buffer, terminators, timeout, cancellationToken);
+                return copied;
             }
-            return await Task.Run(() => ReadTerminatedBlocking(buffer, terminators, timeout, cancellationToken), CancellationToken.None).ConfigureAwait(false);
+            using var deadline = Deadline(timeout);
+            using var linked = deadline is null ? null : CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, deadline.Token);
+            var token = linked?.Token ?? cancellationToken;
+            while (true)
+            {
+                await FillAsync(token, deadline, timeout, buffer, copied, cancellationToken).ConfigureAwait(false);
+                if (TakeTerminated(buffer.Span, terminators.Span, ref copied))
+                {
+                    return copied;
+                }
+            }
         }
         finally
         {
@@ -93,12 +98,22 @@ internal sealed class SerialPortCore : ISerialPort
         EnterRead();
         try
         {
-            if (_rxEnd - _rxStart >= buffer.Length)
+            var copied = 0;
+            if (TakeExactly(buffer.Span, ref copied))
             {
-                ReadExactlyBlocking(buffer, timeout, cancellationToken);
                 return;
             }
-            await Task.Run(() => ReadExactlyBlocking(buffer, timeout, cancellationToken), CancellationToken.None).ConfigureAwait(false);
+            using var deadline = Deadline(timeout);
+            using var linked = deadline is null ? null : CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, deadline.Token);
+            var token = linked?.Token ?? cancellationToken;
+            while (true)
+            {
+                await FillAsync(token, deadline, timeout, buffer, copied, cancellationToken).ConfigureAwait(false);
+                if (TakeExactly(buffer.Span, ref copied))
+                {
+                    return;
+                }
+            }
         }
         finally
         {
@@ -112,7 +127,7 @@ internal sealed class SerialPortCore : ISerialPort
         if (HasAbandonedIo)
         {
             // A port that did not complete one write will not complete the next; every attempt would cost a full
-            // deadline and strand another thread.
+            // deadline and strand another operation on the driver.
             throw new SerialIoAbandonedException(PortName, $"{PortName} did not complete an earlier write, so it is not written to again.", Settings.WriteTimeout);
         }
         cancellationToken.ThrowIfCancellationRequested();
@@ -125,7 +140,7 @@ internal sealed class SerialPortCore : ISerialPort
         try
         {
             // Started outside the wait so a write that FAILED can be told from one still PENDING at the deadline.
-            var write = Task.Run(() => Classify(() => _backend.Write(data.Span), isWrite: true), CancellationToken.None);
+            var write = WriteBackendAsync(data, cancellationToken);
             try
             {
                 await write.WaitAsync(Settings.WriteTimeout, _time, cancellationToken).ConfigureAwait(false);
@@ -173,13 +188,19 @@ internal sealed class SerialPortCore : ISerialPort
             _rx.AsSpan(_rxStart, count).CopyTo(drained);
             _rxStart = _rxEnd = 0;
 
-            // What the driver holds now: taken at once (a one-millisecond slice returns whatever is buffered), up to
-            // the caller's room, then the rest goes to the native discard.
-            while (count < drained.Length && Guard(() => _backend.BytesToRead) > 0)
+            // What the backend holds now, up to the caller's room, then the rest goes to the native discard.
+            while (count < drained.Length)
             {
-                var room = count;
-                var got = ReadBackend(drained[room..], TimeSpan.FromMilliseconds(1));
-                if (got <= 0)
+                int got;
+                try
+                {
+                    got = _backend.ReadAvailable(drained[count..]);
+                }
+                catch (Exception ex) when (IsBackendFault(ex))
+                {
+                    throw Translate(ex, isWrite: false);
+                }
+                if (got == 0)
                 {
                     break;
                 }
@@ -204,7 +225,7 @@ internal sealed class SerialPortCore : ISerialPort
         }
 
         Volatile.Write(ref _closed, 1);
-        var close = Task.Run(_backend.Close, CancellationToken.None);
+        var close = _backend.CloseAsync().AsTask();
         bool closed;
         try
         {
@@ -229,89 +250,6 @@ internal sealed class SerialPortCore : ISerialPort
 
     public async ValueTask DisposeAsync() => await CloseAsync().ConfigureAwait(false);
 
-    private int ReadTerminatedBlocking(Memory<byte> buffer, ReadOnlyMemory<byte> terminators, TimeSpan timeout, CancellationToken cancellationToken)
-    {
-        var start = _time.GetTimestamp();
-        var span = buffer.Span;
-        var term = terminators.Span;
-        var copied = 0;
-        while (true)
-        {
-            var available = _rxEnd - _rxStart;
-            if (available > 0)
-            {
-                var room = span.Length - copied;
-                // Up to `room` bytes of reply, plus one slot for its terminator.
-                var window = _rx.AsSpan(_rxStart, Math.Min(available, room + 1));
-                var at = window.IndexOfAny(term);
-                if (at >= 0)
-                {
-                    window[..at].CopyTo(span[copied..]);
-                    copied += at;
-                    _rxStart += at + 1;
-                    return copied;
-                }
-                if (window.Length == room + 1)
-                {
-                    window[..room].CopyTo(span[copied..]);
-                    copied += room;
-                    _rxStart += room;
-                    throw new SerialFramingException(PortName,
-                        $"{PortName}: no terminator within {span.Length} bytes; the reply is refused.", span[..copied].ToArray());
-                }
-                window.CopyTo(span[copied..]);
-                copied += window.Length;
-                _rxStart += window.Length;
-            }
-
-            _rxStart = _rxEnd = 0;
-            FillOrFail(start, timeout, span[..copied], cancellationToken);
-        }
-    }
-
-    private void ReadExactlyBlocking(Memory<byte> buffer, TimeSpan timeout, CancellationToken cancellationToken)
-    {
-        var start = _time.GetTimestamp();
-        var span = buffer.Span;
-        var copied = 0;
-        while (true)
-        {
-            var take = Math.Min(_rxEnd - _rxStart, span.Length - copied);
-            _rx.AsSpan(_rxStart, take).CopyTo(span[copied..]);
-            copied += take;
-            _rxStart += take;
-            if (copied == span.Length)
-            {
-                return;
-            }
-
-            _rxStart = _rxEnd = 0;
-            FillOrFail(start, timeout, span[..copied], cancellationToken);
-        }
-    }
-
-    /// <summary>
-    /// One slice of waiting: throws for the token or the deadline first, then reads at most one slice into the
-    /// (empty) carry-over.
-    /// </summary>
-    private void FillOrFail(long start, TimeSpan timeout, ReadOnlySpan<byte> received, CancellationToken cancellationToken)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        if (timeout == Timeout.InfiniteTimeSpan)
-        {
-            _rxEnd = ReadBackend(_rx, ReadSlice);
-            return;
-        }
-        var remaining = timeout - _time.GetElapsedTime(start);
-        if (remaining <= TimeSpan.Zero)
-        {
-            throw new SerialTimeoutException(PortName,
-                $"{PortName}: no complete reply within {timeout.TotalMilliseconds:0} ms ({received.Length} byte(s) received).",
-                timeout, received.ToArray());
-        }
-        _rxEnd = ReadBackend(_rx, remaining < ReadSlice ? remaining : ReadSlice);
-    }
-
     /// <summary>A read deadline is positive, or <see cref="Timeout.InfiniteTimeSpan"/> for none (the token alone ends the read).</summary>
     internal static void ThrowIfInvalidReadTimeout(TimeSpan timeout, string paramName)
     {
@@ -321,11 +259,71 @@ internal sealed class SerialPortCore : ISerialPort
         }
     }
 
-    private int ReadBackend(Span<byte> into, TimeSpan timeout)
+    private CancellationTokenSource? Deadline(TimeSpan timeout)
+        => timeout == Timeout.InfiniteTimeSpan ? null : new CancellationTokenSource(timeout, _time);
+
+    /// <summary>
+    /// Moves the carry-over into <paramref name="buffer"/> up to a terminator.
+    /// </summary>
+    /// <returns>True with the reply complete in <c>buffer[..copied]</c>; false when more bytes are needed.</returns>
+    private bool TakeTerminated(Span<byte> buffer, ReadOnlySpan<byte> terminators, ref int copied)
     {
+        var available = _rxEnd - _rxStart;
+        if (available == 0)
+        {
+            return false;
+        }
+        var room = buffer.Length - copied;
+        // Up to `room` bytes of reply, plus one slot for its terminator.
+        var window = _rx.AsSpan(_rxStart, Math.Min(available, room + 1));
+        var at = window.IndexOfAny(terminators);
+        if (at >= 0)
+        {
+            window[..at].CopyTo(buffer[copied..]);
+            copied += at;
+            _rxStart += at + 1;
+            return true;
+        }
+        if (window.Length == room + 1)
+        {
+            window[..room].CopyTo(buffer[copied..]);
+            copied += room;
+            _rxStart += room;
+            throw new SerialFramingException(PortName,
+                $"{PortName}: no terminator within {buffer.Length} bytes; the reply is refused.", buffer[..copied].ToArray());
+        }
+        window.CopyTo(buffer[copied..]);
+        copied += window.Length;
+        _rxStart += window.Length;
+        return false;
+    }
+
+    private bool TakeExactly(Span<byte> buffer, ref int copied)
+    {
+        var take = Math.Min(_rxEnd - _rxStart, buffer.Length - copied);
+        _rx.AsSpan(_rxStart, take).CopyTo(buffer[copied..]);
+        copied += take;
+        _rxStart += take;
+        return copied == buffer.Length;
+    }
+
+    /// <summary>
+    /// Waits for the next bytes into the (empty) carry-over. The deadline's token firing, and not the caller's, is a
+    /// <see cref="SerialTimeoutException"/> carrying what the read had consumed.
+    /// </summary>
+    private async ValueTask FillAsync(CancellationToken token, CancellationTokenSource? deadline, TimeSpan timeout,
+        Memory<byte> buffer, int copied, CancellationToken cancellationToken)
+    {
+        _rxStart = _rxEnd = 0;
         try
         {
-            return _backend.Read(into, timeout);
+            _rxEnd = await _backend.ReadAsync(_rx, token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && deadline is { IsCancellationRequested: true })
+        {
+            throw new SerialTimeoutException(PortName,
+                $"{PortName}: no complete reply within {timeout.TotalMilliseconds:0} ms ({copied} byte(s) received).",
+                timeout, buffer[..copied].ToArray());
         }
         catch (Exception ex) when (IsBackendFault(ex))
         {
@@ -333,19 +331,19 @@ internal sealed class SerialPortCore : ISerialPort
         }
     }
 
-    private void Classify(Action action, bool isWrite)
+    private async Task WriteBackendAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
     {
         try
         {
-            action();
+            await _backend.WriteAsync(data, cancellationToken).ConfigureAwait(false);
         }
-        catch (TimeoutException ex) when (isWrite)
+        catch (TimeoutException ex)
         {
             throw new SerialTimeoutException(PortName, $"{PortName}: the driver gave up the write at its timeout.", Settings.WriteTimeout, innerException: ex);
         }
         catch (Exception ex) when (IsBackendFault(ex))
         {
-            throw Translate(ex, isWrite);
+            throw Translate(ex, isWrite: true);
         }
     }
 
@@ -365,7 +363,14 @@ internal sealed class SerialPortCore : ISerialPort
     private void Guard(Action action)
     {
         ThrowIfClosed();
-        Classify(action, isWrite: false);
+        try
+        {
+            action();
+        }
+        catch (Exception ex) when (IsBackendFault(ex))
+        {
+            throw Translate(ex, isWrite: false);
+        }
     }
 
     private static bool IsBackendFault(Exception ex)
