@@ -65,8 +65,13 @@ number, device instance id, and the USB socket's location path (Windows device t
 
 `IdentityKey` renders the strongest one as a string (`usb:1a86:7523:SERIAL`, `socket:...`, `name:COM3`).
 
+A Bluetooth serial port on Windows also says what it leads to (`SerialPortInfo.Bluetooth`): the paired device's address,
+its name and its Class of Device as Windows recorded them at pairing (`MajorClass`), or `IsIncoming` for Windows' own
+incoming port, which nothing dials. That is what tells a paired headset (`AudioVideo`), whose serial channel takes every
+write and answers none, from a serial module (an HC-05 reports `Uncategorized`), before a probe spends its budget on it.
+
 ## Status
 
 1.0 is the managed backend (the blocking half of `System.IO.Ports`); 1.1 adds reads with no deadline
-(`Timeout.InfiniteTimeSpan`, the token alone ends them) and the loopback pair. A native Win32 backend (overlapped I/O
+(`Timeout.InfiniteTimeSpan`, the token alone ends them) and the loopback pair; 1.2 the Bluetooth device behind a port. A native Win32 backend (overlapped I/O
 driven correctly) is planned as 2.0, behind the same API. Design notes: `docs/plans/serial-lib.md` in tianwen.

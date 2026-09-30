@@ -94,7 +94,36 @@ internal static unsafe partial class WindowsPortEnumerator
             SerialNumber = serial,
             DeviceInstanceId = instanceId,
             LocationPath = location,
+            Bluetooth = BluetoothInstanceId.TryParse(instanceId, out var bluetooth) ? DescribeBluetooth(bluetooth.Address) : null,
         };
+    }
+
+    /// <summary>
+    /// The paired device at <paramref name="address"/> as Windows recorded it when it was paired (its name and Class of
+    /// Device, under <c>BTHPORT\Parameters\Devices</c>), or only the address when the record cannot be read.
+    /// </summary>
+    private static SerialBluetoothDevice DescribeBluetooth(ulong address)
+    {
+        var device = new SerialBluetoothDevice(address);
+        if (device.IsIncoming)
+        {
+            return device;
+        }
+        try
+        {
+            using var key = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Services\BTHPORT\Parameters\Devices\{device.AddressText}");
+            if (key is null)
+            {
+                return device;
+            }
+            var name = key.GetValue("Name") is byte[] { Length: > 0 } bytes ? System.Text.Encoding.UTF8.GetString(bytes).TrimEnd('\0') : null;
+            uint? cod = key.GetValue("COD") is int value ? unchecked((uint)value) : null;
+            return device with { Name = name is { Length: > 0 } ? name : null, ClassOfDevice = cod };
+        }
+        catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException or IOException)
+        {
+            return device;
+        }
     }
 
     private static string? ReadPortName(nint set, SP_DEVINFO_DATA* data)

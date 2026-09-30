@@ -29,6 +29,37 @@ public sealed class EnumerationTests
     [InlineData(null)]
     public void ANonUsbInstanceIdIsNotParsed(string? id) => UsbInstanceId.TryParse(id, out _).ShouldBeFalse();
 
+    [Theory]
+    [InlineData(@"BTHENUM\{00001101-0000-1000-8000-00805F9B34FB}_VID&000105D6_PID&000A\5&26CB095F&0&83CD1DB5D95D_C00000000", 0x83CD1DB5D95DUL)]
+    [InlineData(@"BTHENUM\{00001101-0000-1000-8000-00805F9B34FB}_LOCALMFG&0000\5&26CB095F&0&000000000000_00000000", 0UL)]
+    [InlineData(@"BTHENUM\{00001101-0000-1000-8000-00805F9B34FB}_LOCALMFG&0000\7&1&0&000000000000_00000000", 0UL)]
+    public void ABluetoothSerialPortNamesTheDeviceAtItsFarEnd(string id, ulong address)
+    {
+        BluetoothInstanceId.TryParse(id, out var parsed).ShouldBeTrue();
+        parsed.Address.ShouldBe(address);
+        new SerialBluetoothDevice(parsed.Address).IsIncoming.ShouldBe(address == 0, "Windows' own incoming port has no remote device");
+    }
+
+    [Theory]
+    [InlineData(@"USB\VID_1A86&PID_7523\5&2A3B4C5D&0&3")]
+    [InlineData(@"BTHENUM\{00001101-0000-1000-8000-00805F9B34FB}_LOCALMFG&0000\5&26CB095F&0&0000_00000000")]  // not twelve digits
+    [InlineData(@"BTHENUM\{00001101-0000-1000-8000-00805F9B34FB}")]
+    [InlineData("")]
+    [InlineData(null)]
+    public void AnythingElseIsNotABluetoothPort(string? id) => BluetoothInstanceId.TryParse(id, out _).ShouldBeFalse();
+
+    [Theory]
+    [InlineData(0x240404u, BluetoothMajorClass.AudioVideo)]    // a pair of headphones ("S42", a wearable headset)
+    [InlineData(0x001F00u, BluetoothMajorClass.Uncategorized)] // an HC-05 serial module's default
+    [InlineData(0x000000u, BluetoothMajorClass.Miscellaneous)]
+    [InlineData(0x7A020Cu, BluetoothMajorClass.Phone)]
+    [InlineData(0x380104u, BluetoothMajorClass.Computer)]
+    public void ADevicesMajorClassIsReadFromItsClassOfDevice(uint cod, BluetoothMajorClass major)
+        => new SerialBluetoothDevice(0x83CD1DB5D95D) { ClassOfDevice = cod }.MajorClass.ShouldBe(major);
+
+    [Fact]
+    public void AnAddressIsWrittenAsWindowsWritesIt() => new SerialBluetoothDevice(0x83CD1DB5D95D).AddressText.ShouldBe("83cd1db5d95d");
+
     [Fact]
     public void AStringListSplitsOnItsNuls()
         => DeviceStrings.MultiSz(Encoding.Unicode.GetBytes("PCIROOT(0)#PCI(1400)#USBROOT(0)#USB(3)\0ACPI(_SB_)\0\0"))
