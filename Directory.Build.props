@@ -5,7 +5,7 @@
          (dotnet msbuild -getProperty:VersionMajorMinor) and appends the run number, so a release
          bump is this one line. 1.0 is P1 of docs/plans/serial-lib.md in tianwen (the managed backend);
          1.1 adds a read with no deadline (Timeout.InfiniteTimeSpan), which TianWen's token-bounded reads need. -->
-    <VersionMajorMinor>1.1</VersionMajorMinor>
+    <VersionMajorMinor>1.2</VersionMajorMinor>
     <!-- Local builds get Major.Minor.0; CI passes -p:Version=Major.Minor.<run><attempt>+<sha>, and
          the condition lets it win. -->
     <VersionPrefix Condition="'$(VersionPrefix)' == ''">$(VersionMajorMinor).0</VersionPrefix>

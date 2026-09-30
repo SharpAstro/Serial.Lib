@@ -47,6 +47,14 @@ public sealed record SerialPortInfo(string PortName)
     /// <summary>The Linux <c>/dev/serial/by-id</c> name, when udev made one.</summary>
     public string? ById { get; init; }
 
+    /// <summary>
+    /// What a Bluetooth serial port leads to (Windows): the paired device at its far end, with the name and class Windows
+    /// recorded for it, or Windows' own incoming port. Null for any other port. A caller probing ports for instruments can
+    /// tell a paired headset (<see cref="BluetoothMajorClass.AudioVideo"/>), whose serial channel takes every write and
+    /// answers none, from a serial module.
+    /// </summary>
+    public SerialBluetoothDevice? Bluetooth { get; init; }
+
     /// <summary>The strongest identity available for this port.</summary>
     public SerialIdentityKind Identity
         => VendorId is not null && ProductId is not null && !string.IsNullOrEmpty(SerialNumber) ? SerialIdentityKind.Device
